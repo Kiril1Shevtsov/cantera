@@ -619,12 +619,13 @@ void MultiPhase::equilibrate(const string& XY, const string& solver,
     double initial_P = m_press;
     int ixy = _equilflag(XY.c_str());
     const bool supportsSurface = (ixy == TP && solver != "gibbs")
-        || ((ixy == HP || ixy == SP) && solver == "vcs");
+        || (solver == "vcs"
+            && (ixy == HP || ixy == SP || ixy == TV || ixy == UV || ixy == SV));
     for (size_t i = 0; i < nPhases(); i++) {
         if (m_phase[i]->nDim() != 3 && !supportsSurface) {
             throw CanteraError("MultiPhase::equilibrate",
                 "Surface equilibrium is supported only at fixed TP with solver='vcs' "
-                "or solver='auto', or at fixed HP or SP with solver='vcs'.");
+                "or solver='auto', or at fixed HP, SP, TV, UV, or SV with solver='vcs'.");
         }
     }
     EquilPhaseGuard phase_guard(*this);

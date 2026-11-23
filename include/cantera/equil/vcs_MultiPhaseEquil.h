@@ -209,6 +209,12 @@ public:
                        int printLvl = 0, double err = 1.0E-6,
                        int maxsteps = VCS_MAXSTEPS, int logLevel = -99);
 
+private:
+    //! Constant-pressure inner solve, including the energy step for UV.
+    int equilibrate_HPImpl(double target, int XY, double Tlow, double Thigh,
+                           int estimateEquil, int printLvl, double err,
+                           int maxsteps, int logLevel);
+
 protected:
     //! Pointer to the MultiPhase mixture that will be equilibrated.
     /*!

@@ -1148,8 +1148,10 @@ class TestSurfaceMultiphaseEquil:
     @pytest.mark.parametrize("pair,solver", [("TP", "gibbs")] + [
         (pair, solver) for pair in ("HP", "SP") for solver in ("auto", "gibbs")
     ] + [
-        (pair, solver) for pair in ("TV", "HV", "UV", "SV")
-        for solver in ("vcs", "auto", "gibbs")])
+        (pair, solver) for pair in ("TV", "UV", "SV")
+        for solver in ("auto", "gibbs")
+    ] + [("HV", solver) for solver in ("vcs", "auto", "gibbs")] +
+        [("UP", "vcs")])
     @pytest.mark.parametrize("surface_only", [False, True])
     def test_unsupported_solver_or_constraints_preserve_state(self, pair, solver,
                                                              surface_only):
@@ -1158,6 +1160,104 @@ class TestSurfaceMultiphaseEquil:
         message = ("unknown property pair HV" if pair == "HV"
                    else "Surface equilibrium is supported only")
         self.check_rejected(mix, pair, solver, message)
+
+    @pytest.mark.parametrize("pair", ["TV", "UV", "SV"])
+    @pytest.mark.parametrize("y0", [0.2, 0.85])
+    @pytest.mark.parametrize("T_target,P_target,reverse", [
+        (600., 90000., False), (800., 140000., True),
+    ])
+    def test_fixed_volume_pressure_motion(self, pair, y0, T_target, P_target, reverse):
+        # Inert Ar transfers between gas and adsorbed surface states; He is a
+        # spectator. This changes total gas amount, unlike a 1:1 site exchange.
+        T_ref, P_ref, cp = 300., ct.one_atm, 22000.
+        R, h_as, y_target = ct.gas_constant, -3.e6, 2 / 3
+        V = (2 - y_target) * R * T_target / P_target
+        p_ar = (1.1 - y_target) * R * T_target / V
+        g_base = cp * (T_target - T_ref - T_target * np.log(T_target / T_ref))
+        s_as = (h_as - g_base) / T_target + R * (np.log(y_target / (1 - y_target))
+                                                - np.log(p_ar / P_ref))
+
+        def species(name, atoms, h0=0., s0=0.):
+            sp = ct.Species(name, atoms)
+            sp.thermo = ct.ConstantCp(200., 3000., P_ref, (T_ref, h0, s0, cp))
+            return sp
+
+        gas = ct.Solution(thermo="ideal-gas", species=[
+            species("Ar-gas", {"Ar": 1}), species("He-gas", {"He": 1})])
+        surf = ct.Interface(thermo="ideal-surface", kinetics="surface", reactions=[],
+                            species=[species("Ar-ads", {"Ar": 1}, h_as, s_as),
+                                     species("empty-site", {})])
+        surf.site_density = 1
+
+        def cv(y):
+            return (3 - y) * cp - (2 - y) * R
+
+        def internal_energy(T, y):
+            return h_as * y + cv(y) * T - (3 - y) * cp * T_ref
+
+        def entropy(T, y):
+            n_gas = np.array([1.1 - y, 0.9])
+            theta = np.array([y, 1 - y])
+            mixing = n_gas @ np.log(n_gas * R * T / (V * P_ref))
+            mixing += theta @ np.log(theta)
+            return s_as * y + (3 - y) * cp * np.log(T / T_ref) - R * mixing
+
+        if pair == "TV":
+            T0 = T_target
+        elif pair == "UV":
+            target = internal_energy(T_target, y_target)
+            T0 = (target - h_as * y0 + (3 - y0) * cp * T_ref) / cv(y0)
+        else:
+            target = entropy(T_target, y_target)
+            T0 = T_target * np.exp((target - entropy(T_target, y0)) / cv(y0))
+
+        P0 = (2 - y0) * R * T0 / V
+        gas.TPX = T0, P0, [1.1 - y0, 0.9]
+        surf.TPX = T0, P0, [y0, 1 - y0]
+        phases = [(gas, 2 - y0), (surf, 1.)]
+        mix = ct.Mixture(phases[::-1] if reverse else phases)
+        balance = self.constraints(mix)
+        amounts = balance @ mix.species_moles
+        assert abs(P0 / P_target - 1.) > 0.015
+
+        def total(prop):
+            return sum(mix.phase_moles(i) * getattr(mix.phase(i), prop)
+                       for i in range(mix.n_phases))
+
+        if pair != "TV":
+            prop = "int_energy_mole" if pair == "UV" else "entropy_mole"
+            assert total(prop) == approx(target, rel=1e-12)
+        assert total("volume_mole") == approx(V, rel=1e-13)
+
+        mix.equilibrate(pair, solver="vcs", rtol=1e-9)
+        assert mix.T == approx(T_target, abs=3e-4)
+        assert mix.P == approx(P_target, rel=3e-7)
+        assert gas.X == approx(np.array([1.1 - y_target, 0.9]) / (2 - y_target),
+                               abs=3e-7)
+        assert surf.coverages == approx([y_target, 1 - y_target], abs=3e-7)
+        assert balance @ mix.species_moles == approx(amounts, abs=3e-10)
+        assert total("volume_mole") == approx(V, rel=3e-8)
+        if pair != "TV":
+            assert total(prop) == approx(target, rel=3e-8)
+        mu_A = gas.chemical_potentials[0]
+        mu_As, mu_site = surf.chemical_potentials
+        assert (mu_As - mu_site - mu_A) / (R * mix.T) == approx(0., abs=3e-7)
+
+    @pytest.mark.parametrize("pair", ["TV", "UV", "SV"])
+    @pytest.mark.parametrize("include_empty_gas", [False, True])
+    def test_fixed_volume_rejects_zero_gas_volume(self, pair, include_empty_gas):
+        gas, surf = self.make_phases()
+        phases = [(surf, 1)]
+        if include_empty_gas:
+            phases.append((gas, 0))
+        mix = ct.Mixture(phases)
+        self.check_rejected(mix, pair, "vcs", "requires a positive gas volume")
+
+    @pytest.mark.parametrize("pair", ["TV", "UV", "SV"])
+    def test_fixed_volume_rejects_unequal_site_sizes(self, pair):
+        gas, surf = self.make_phases(sizes=(1, 2))
+        mix = ct.Mixture([(gas, 1), (surf, 1)])
+        self.check_rejected(mix, pair, "vcs", "neutral species with equal positive site sizes")
 
     @pytest.mark.parametrize("pair", ["HP", "SP"])
     def test_fixed_pressure_rejects_unequal_site_sizes(self, pair):
