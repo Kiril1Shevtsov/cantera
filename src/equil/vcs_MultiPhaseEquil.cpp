@@ -13,20 +13,42 @@
 #include "cantera/thermo/IdealSolidSolnPhase.h"
 #include "cantera/thermo/IdealMolalSoln.h"
 
+#include <cmath>
+
 namespace Cantera
 {
 namespace {
 
-void checkSurfaceMode(MultiPhase* mix, int XY)
+bool checkSurfaceMode(MultiPhase* mix, int XY)
 {
-    if (XY != TP && XY != HP && XY != SP) {
-        for (size_t i = 0; i < mix->nPhases(); i++) {
-            if (mix->phase(i).nDim() != 3) {
-                throw CanteraError("vcs_MultiPhaseEquil::equilibrate",
-                    "Surface VCS equilibrium is supported only at fixed TP, HP, or SP.");
-            }
+    if (XY == TP || XY == HP || XY == SP) {
+        return false;
+    }
+    bool hasSurface = false;
+    for (size_t i = 0; i < mix->nPhases(); i++) {
+        hasSurface = hasSurface || mix->phase(i).nDim() != 3;
+    }
+    if (!hasSurface) {
+        return false;
+    }
+
+    if (XY != TV && XY != UV && XY != SV) {
+        throw CanteraError("vcs_MultiPhaseEquil::equilibrate",
+            "Surface VCS equilibrium is supported only at fixed TP, HP, SP, TV, UV, or SV.");
+    }
+    for (size_t i = 0; i < mix->nPhases(); i++) {
+        const auto& phase = mix->phase(i);
+        if (phase.nDim() == 3 && phase.type() != "ideal-gas") {
+            throw CanteraError("vcs_MultiPhaseEquil::equilibrate",
+                "Fixed-volume surface equilibrium requires ideal-gas bulk phases.");
         }
     }
+    double volume = mix->volume();
+    if (!std::isfinite(volume) || volume <= 0.0) {
+        throw CanteraError("vcs_MultiPhaseEquil::equilibrate",
+            "Fixed-volume surface equilibrium requires a positive gas volume.");
+    }
+    return true;
 }
 
 }
@@ -41,7 +63,7 @@ int vcs_MultiPhaseEquil::equilibrate_TV(int XY, double xtarget, int estimateEqui
                                         int printLvl, double err,
                                         int maxsteps, int loglevel)
 {
-    checkSurfaceMode(m_mix, XY);
+    bool surface = checkSurfaceMode(m_mix, XY);
     double Vtarget = m_mix->volume();
     if ((XY != TV) && (XY != HV) && (XY != UV) && (XY != SV)) {
         throw CanteraError("vcs_MultiPhaseEquil::equilibrate_TV",
@@ -72,8 +94,9 @@ int vcs_MultiPhaseEquil::equilibrate_TV(int XY, double xtarget, int estimateEqui
                                       printLvlSub, err, maxsteps, loglevel);
             break;
         case UV:
-            iSuccess = equilibrate_HP(xtarget, UP, Tlow, Thigh, strt,
-                                      printLvlSub, err, maxsteps, loglevel);
+            // UP is an internal step of UV, not a new public surface mode.
+            iSuccess = equilibrate_HPImpl(xtarget, UP, Tlow, Thigh, strt,
+                                          printLvlSub, err, maxsteps, loglevel);
             break;
         case SV:
             iSuccess = equilibrate_SP(xtarget, Tlow, Thigh, strt,
@@ -84,6 +107,10 @@ int vcs_MultiPhaseEquil::equilibrate_TV(int XY, double xtarget, int estimateEqui
         }
         strt = false;
         double Vnow = m_mix->volume();
+        if (surface && (!std::isfinite(Vnow) || Vnow <= 0.0)) {
+            throw CanteraError("vcs_MultiPhaseEquil::equilibrate_TV",
+                "The gas phase lost its positive volume during surface equilibrium.");
+        }
         if (n == 0) {
             V2 = Vnow;
             P2 = Pnow;
@@ -105,6 +132,10 @@ int vcs_MultiPhaseEquil::equilibrate_TV(int XY, double xtarget, int estimateEqui
         // find dV/dP
         if (n > 1) {
             double dVdP = (V2 - V1) / (P2 - P1);
+            if (surface && !std::isfinite(dVdP)) {
+                throw CanteraError("vcs_MultiPhaseEquil::equilibrate_TV",
+                    "Cannot determine a finite pressure slope.");
+            }
             if (dVdP == 0.0) {
                 throw CanteraError("vcs_MultiPhase::equilibrate_TV",
                                    "dVdP == 0.0");
@@ -120,6 +151,10 @@ int vcs_MultiPhaseEquil::equilibrate_TV(int XY, double xtarget, int estimateEqui
         } else {
             m_mix->setPressure(Pnow*1.01);
             double dVdP = (m_mix->volume() - Vnow)/(0.01*Pnow);
+            if (surface && (dVdP == 0.0 || !std::isfinite(dVdP))) {
+                throw CanteraError("vcs_MultiPhaseEquil::equilibrate_TV",
+                    "Cannot determine a finite nonzero pressure slope.");
+            }
             Pnew = Pnow + 0.5*(Vtarget - Vnow)/dVdP;
             if (Pnew < 0.5* Pnow) {
                 Pnew = 0.5 * Pnow;
@@ -139,6 +174,14 @@ int vcs_MultiPhaseEquil::equilibrate_HP(double Htarget, int XY, double Tlow,
     int loglevel)
 {
     checkSurfaceMode(m_mix, XY);
+    return equilibrate_HPImpl(Htarget, XY, Tlow, Thigh, estimateEquil, printLvl,
+                             err, maxsteps, loglevel);
+}
+
+int vcs_MultiPhaseEquil::equilibrate_HPImpl(double Htarget, int XY, double Tlow,
+    double Thigh, int estimateEquil, int printLvl, double err, int maxsteps,
+    int loglevel)
+{
     int maxiter = 100;
     int iSuccess;
     if (XY != HP && XY != UP) {

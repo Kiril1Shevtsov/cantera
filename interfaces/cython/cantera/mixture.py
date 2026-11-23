@@ -63,6 +63,9 @@ class Mixture:
     Neutral ideal surface phases whose species all occupy the same number of sites
     can be equilibrated at fixed TP using the VCS solver (or solver='auto'),
     or at fixed HP or SP using only the explicit choice solver='vcs'.
+    Explicit VCS also supports TV, UV and SV if all bulk phases are ideal gases
+    and the mixture has positive gas volume. A surface alone does not determine
+    a pressure at fixed volume.
     Their initial site inventories, and therefore their areas at fixed site density,
     are conserved independently. The supplied phase amounts count kmol of surface
     species; the site inventory is this amount times the common species site size.
@@ -348,7 +351,7 @@ class Mixture:
         :param XY:
             A two-letter string, which must be one of the set::
 
-                ['TP', 'HP', 'SP']
+                ['TP', 'HP', 'SP', 'TV', 'UV', 'SV']
         :param solver: Set to either 'auto', 'vcs', or 'gibbs' to choose
             implementation of the solver to use. 'vcs' uses the solver
             implemented in the C++ class 'VCSnonideal', 'gibbs' uses the one
